@@ -50,6 +50,27 @@ const SYNC_CONFIG = {
     ],
 };
 
+// Optional defaults for remote-required relations when pushing from local
+const DEFAULT_IDS = {
+  STORE_ID: process.env.DEFAULT_STORE_ID || process.env.SEED_STORE_ID || null,
+  BRANCH_ID: process.env.DEFAULT_BRANCH_ID || process.env.SEED_BRANCH_ID || null,
+};
+
+async function ensureDefaultIds() {
+  try {
+    if (!DEFAULT_IDS.STORE_ID) {
+      const s = await remoteDb.store.findFirst({ select: { id: true } });
+      if (s?.id) DEFAULT_IDS.STORE_ID = s.id;
+    }
+  } catch (_) {}
+  try {
+    if (!DEFAULT_IDS.BRANCH_ID) {
+      const b = await remoteDb.branch.findFirst({ select: { id: true } });
+      if (b?.id) DEFAULT_IDS.BRANCH_ID = b.id;
+    }
+  } catch (_) {}
+}
+
 // Models to sync bidirectionally
 const SYNC_MODELS = SYNC_CONFIG.SYNC_MODELS;
 
@@ -168,6 +189,10 @@ async function pullOnce(options = {}) {
               percent,      // Discount
               imageUrl,     // Category (exists in Product, but different schema in Category)
               logoUrl,      // Brand
+              // Remote-only user fields
+              permissions,
+              mustChangePassword,
+              refreshToken,
               // Keep the rest
               ...cleanMapped
             } = mapped || {};
@@ -343,6 +368,174 @@ async function pushOnce() {
     }
   }
   
+  // Fallback: also push unsynced local records even if not enqueued
+  await ensureDefaultIds();
+  // Heuristic: rows with pendingSync=true OR syncStatus='PENDING' OR lastSyncedAt IS NULL
+  for (const model of SYNC_MODELS) {
+    const { local, remote } = getDelegates(model);
+    if (!local || !remote) continue;
+    try {
+      const pk = MODEL_PK[model];
+      let candidates = [];
+      // Try by pendingSync
+      try {
+        candidates = await local.findMany({ where: { pendingSync: true }, take: SYNC_CONFIG.PUSH_BATCH_SIZE });
+      } catch (_) {}
+      // If none, try by syncStatus
+      if (candidates.length === 0) {
+        try {
+          candidates = await local.findMany({ where: { syncStatus: 'PENDING' }, take: SYNC_CONFIG.PUSH_BATCH_SIZE });
+        } catch (_) {}
+      }
+      // If none, try by lastSyncedAt null
+      if (candidates.length === 0) {
+        try {
+          candidates = await local.findMany({ where: { lastSyncedAt: null }, take: SYNC_CONFIG.PUSH_BATCH_SIZE });
+        } catch (_) {}
+      }
+      // If still none, try updated since watermark
+      if (candidates.length === 0) {
+        try {
+          const since = await getLastSyncAt();
+          candidates = await local.findMany({ where: { updatedAt: { gt: since } }, take: SYNC_CONFIG.PUSH_BATCH_SIZE });
+        } catch (_) {}
+      }
+      if (candidates.length === 0) continue;
+      if (SYNC_CONFIG.SYNC_LOG_ENABLED) {
+        console.log(`[sync-push] ${model}: found ${candidates.length} unsynced records`);
+      }
+      for (const row of candidates) {
+        try {
+          let payload = toRemote(model, row);
+          // Strip local-only sync metadata and fields not present remotely
+          const {
+            // local sync flags
+            pendingSync,
+            syncStatus,
+            lastSyncedAt,
+            syncAttempts,
+            // generic local-only
+            version, // keep if remote supports; re-add per-model if needed
+            // model-specific removals
+            storeId, // remove for models where remote doesn't have it (e.g., SaleOrder)
+            ...cleanPayload
+          } = payload || {};
+          payload = cleanPayload;
+          // Drop any central* reference fields not present in remote schema
+          Object.keys(payload).forEach((k) => {
+            if (/^central[A-Z]/.test(k)) delete payload[k];
+          });
+          // Re-introduce allowed fields per model
+          if (model === 'InventoryItem') {
+            // InventoryItem in remote has version; add back if we had it
+            if (typeof version !== 'undefined') payload.version = version;
+          }
+          // For store-scoped models, use relation connect to satisfy required relation in remote
+          const needsStoreConnect = ['Category','Brand','Product','CustomerGroup','Customer','TaxCategory'].includes(model);
+          if (needsStoreConnect) {
+            const effectiveStoreId = storeId || DEFAULT_IDS.STORE_ID;
+            if (!effectiveStoreId) {
+              if (SYNC_CONFIG.SYNC_LOG_ENABLED) console.warn(`[push] Skipping ${model} without storeId. Set DEFAULT_STORE_ID to enable push.`);
+              continue;
+            }
+            payload.store = { connect: { id: effectiveStoreId } };
+            delete payload.storeId;
+          } else if (model !== 'SaleOrder' && model !== 'Shift') {
+            // add storeId back for models that support primitive storeId
+            if (typeof storeId !== 'undefined') payload.storeId = storeId;
+          }
+          // Per-model adjustments for remote schema compatibility
+          if (model === 'Product' || model === 'Category') {
+            if (Array.isArray(payload.imageUrl)) {
+              payload.imageUrl = payload.imageUrl.length > 0 ? payload.imageUrl[0] : null;
+            }
+          }
+          if (model === 'Category') {
+            if (Object.prototype.hasOwnProperty.call(payload, 'parentId')) {
+              if (payload.parentId) {
+                payload.parent = { connect: { id: payload.parentId } };
+              }
+              delete payload.parentId;
+            }
+          }
+          if (model === 'Product') {
+            if (payload.categoryId) {
+              payload.category = { connect: { id: payload.categoryId } };
+              delete payload.categoryId;
+            }
+            if (payload.brandId) {
+              payload.brand = { connect: { id: payload.brandId } };
+              delete payload.brandId;
+            }
+            if (payload.taxCategoryId) {
+              payload.taxCategory = { connect: { id: payload.taxCategoryId } };
+              delete payload.taxCategoryId;
+            }
+          }
+          if (model === 'ProductVariant') {
+            if (payload.productId) {
+              payload.product = { connect: { id: payload.productId } };
+              delete payload.productId;
+            }
+          }
+          if (model === 'Customer') {
+            if (Object.prototype.hasOwnProperty.call(payload, 'groupId')) {
+              if (payload.groupId) {
+                payload.group = { connect: { id: payload.groupId } };
+              }
+              delete payload.groupId;
+            }
+          }
+          if (model === 'InventoryItem') {
+            if (payload.variantId) {
+              payload.variant = { connect: { id: payload.variantId } };
+              delete payload.variantId;
+            }
+            if (payload.locationId) {
+              payload.location = { connect: { id: payload.locationId } };
+              delete payload.locationId;
+            }
+          }
+          if (model === 'Location') {
+            // Remote requires branchId
+            if (!payload.branchId) {
+              if (DEFAULT_IDS.BRANCH_ID) {
+                // Use relation connect to satisfy required relation in remote
+                payload.branch = { connect: { id: DEFAULT_IDS.BRANCH_ID } };
+              } else {
+                if (SYNC_CONFIG.SYNC_LOG_ENABLED) {
+                  console.warn('[push] Skipping Location without branchId. Set DEFAULT_BRANCH_ID to enable push.');
+                }
+                continue;
+              }
+            }
+            // Clean primitive branchId if present to avoid mixed relation inputs
+            delete payload.branchId;
+          }
+          if (model === 'Brand') {
+            if (typeof payload.logoUrl === 'undefined') payload.logoUrl = null;
+          }
+          await remote.upsert({ where: { [pk]: payload[pk] }, create: payload, update: payload });
+          // Best-effort mark as synced locally
+          try {
+            await local.update({ where: { [pk]: row[pk] }, data: { lastSyncedAt: new Date(), syncStatus: 'SYNCED', pendingSync: false } });
+          } catch (_) {}
+          stats.processed++;
+          stats.models[model] = (stats.models[model] || 0) + 1;
+        } catch (e) {
+          stats.failed++;
+          if (SYNC_CONFIG.SYNC_LOG_ENABLED) {
+            console.error(`[push] Failed to push ${model} ${row[pk]}:`, e.message);
+          }
+        }
+      }
+    } catch (e) {
+      if (SYNC_CONFIG.SYNC_LOG_ENABLED) {
+        console.error(`[push] Scan failed for ${model}:`, e.message);
+      }
+    }
+  }
+
   if (SYNC_CONFIG.SYNC_LOG_ENABLED) {
     console.log(`[sync-push] Completed: ${stats.processed} processed, ${stats.failed} failed`);
   }

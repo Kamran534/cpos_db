@@ -18,7 +18,8 @@
     "prisma:pull": "prisma db pull",
     "compare:schemas": "node scripts/compare-schemas.js",
     "images:download": "node scripts/download-images.js",
-    "seed": "prisma db seed"
+    "seed": "prisma db seed",
+    "seed:local": "node prisma/seed.payflow.js"
   },
   "keywords": [
     "csu",

@@ -267,6 +267,35 @@ model Customer {
   @@index([storeId])
 }
 
+// ============================================
+// USER (LOCAL COPY FOR OFFLINE AUTH)
+// ============================================
+
+model User {
+  id               String   @id @default(uuid())
+
+  username         String   @unique
+  email            String   @unique
+  passwordHash     String?
+  firstName        String
+  lastName         String
+  phone            String?
+
+  role             String?
+  isActive         Boolean  @default(true)
+
+  storeId          String?
+
+  lastLoginAt      DateTime?
+  loginAttempts    Int      @default(0)
+  lockedUntil      DateTime?
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([storeId])
+}
+
 enum CustomerType {
   REGULAR
   VIP
