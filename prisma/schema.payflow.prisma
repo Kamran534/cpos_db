@@ -1,0 +1,1004 @@
+// schema.payflow.prisma - PayFlow Local SQLite Database
+generator client {
+  provider = "prisma-client-js"
+  output = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("SQLITE_PATH_LOCAL")
+}
+
+// ============================================
+// STORE & TERMINAL CONFIG
+// ============================================
+
+model Store {
+  id              String   @id @default(uuid())
+  storeCode       String   @unique
+  storeName       String
+  legalName       String?
+
+  // Contact Information
+  email           String?
+  phone           String?
+
+  // Address
+  addressLine1    String?
+  addressLine2    String?
+  city            String?
+  state           String?
+  zipCode         String?
+  country         String   @default("US")
+
+  // Configuration
+  timezone        String   @default("UTC")
+  defaultCurrency String   @default("USD")
+
+  // Sync Information
+  centralStoreId  String?  // Reference to central store
+  lastFullSync    DateTime?
+
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relationships
+  customers       Customer[]
+  products        Product[]
+  saleOrders      SaleOrder[]
+  shifts          Shift[]
+}
+
+model Terminal {
+  id              String   @id @default(uuid())
+  terminalCode    String   @unique
+  terminalName    String
+  apiKey          String   @unique
+  ipAddress       String?
+  macAddress      String?
+
+  // Local branch/location reference
+  locationId      String?
+  location        Location? @relation(fields: [locationId], references: [id])
+
+  // Sync Information
+  centralTerminalId String? // Reference to central terminal
+  centralBranchId   String? // Reference to central branch
+
+  // Status
+  status          TerminalStatus @default(OFFLINE)
+  lastHeartbeat   DateTime?
+  lastSyncAt      DateTime?
+  version         String?
+
+  // Configuration
+  isActive        Boolean  @default(true)
+  registeredAt    DateTime @default(now())
+
+  // Relationships
+  saleOrders      SaleOrder[]
+  shifts          Shift[]
+
+  @@index([locationId])
+  @@index([status])
+}
+
+enum TerminalStatus {
+  ONLINE
+  OFFLINE
+  SYNCING
+  MAINTENANCE
+  ERROR
+}
+
+// ============================================
+// SYNC MANAGEMENT (LOCAL)
+// ============================================
+
+model SyncQueue {
+  id              String   @id @default(uuid())
+  entityType      String
+  entityId        String
+  operation       SyncOperation
+  data            String   // JSON payload
+  priority        Int      @default(5)
+
+  // Sync status
+  status          SyncStatus @default(PENDING)
+  attemptCount    Int      @default(0)
+  errorMessage    String?
+  lastAttemptAt   DateTime?
+
+  // Metadata
+  createdAt       DateTime @default(now())
+  processedAt     DateTime?
+
+  @@index([entityType, status])
+  @@index([status, priority])
+  @@index([createdAt])
+}
+
+enum SyncOperation {
+  CREATE
+  UPDATE
+  DELETE
+}
+
+enum SyncStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  SYNCED
+}
+
+model SyncHistory {
+  id              String   @id @default(uuid())
+  syncType        String   // FULL, INCREMENTAL, PUSH, PULL
+  direction       SyncDirection
+  entitiesSynced  Int      @default(0)
+  successCount    Int      @default(0)
+  failureCount    Int      @default(0)
+
+  startedAt       DateTime @default(now())
+  completedAt     DateTime?
+  durationMs      Int?
+
+  errorMessage    String?
+
+  @@index([startedAt])
+  @@index([syncType])
+}
+
+enum SyncDirection {
+  UPLOAD
+  DOWNLOAD
+  BIDIRECTIONAL
+}
+
+// ============================================
+// LOCATION MANAGEMENT
+// ============================================
+
+model Location {
+  id              String   @id @default(uuid())
+  code            String   @unique
+  name            String
+  type            LocationType @default(STORE)
+
+  // Address
+  address         String?
+  city            String?
+  state           String?
+  zipCode         String?
+  country         String   @default("US")
+
+  // Contact
+  phone           String?
+  email           String?
+
+  // Configuration
+  timezone        String   @default("UTC")
+  taxRate         Float    @default(0)
+
+  // Sync Information
+  centralLocationId String? // Reference to central location
+  syncStatus      SyncStatus @default(SYNCED)
+  lastSyncedAt    DateTime?
+  pendingSync     Boolean  @default(false)
+
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relationships
+  terminals       Terminal[]
+  saleOrders      SaleOrder[]
+  inventoryItems  InventoryItem[]
+  shifts          Shift[]
+  stockAdjustments StockAdjustment[]
+  stockTransfersFrom StockTransfer[] @relation("FromLocation")
+  stockTransfersTo   StockTransfer[] @relation("ToLocation")
+  returnOrders    ReturnOrder[]
+
+  @@index([code])
+  @@index([type])
+}
+
+enum LocationType {
+  STORE
+  WAREHOUSE
+  SHOWROOM
+  KIOSK
+}
+
+// ============================================
+// CUSTOMER MANAGEMENT
+// ============================================
+
+model Customer {
+  id              String   @id @default(uuid())
+  code            String   @unique
+  firstName       String
+  lastName        String
+  email           String?
+  phone           String?
+
+  dateOfBirth     DateTime?
+  gender          String?
+
+  type            CustomerType @default(REGULAR)
+  groupId         String?
+  group           CustomerGroup? @relation(fields: [groupId], references: [id])
+
+  loyaltyPoints   Int      @default(0)
+  totalSpent      Float    @default(0)
+  totalOrders     Int      @default(0)
+
+  creditLimit     Float?
+  currentBalance  Float    @default(0)
+
+  allowMarketing  Boolean  @default(false)
+  notes           String?
+
+  // Sync Information
+  centralCustomerId String? // Reference to central customer
+  syncStatus      SyncStatus @default(SYNCED)
+  lastSyncedAt    DateTime?
+  pendingSync     Boolean  @default(false)
+  version         Int      @default(1)
+
+  storeId         String?
+  store           Store?   @relation(fields: [storeId], references: [id])
+
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relationships
+  addresses       CustomerAddress[]
+  saleOrders      SaleOrder[]
+  returnOrders    ReturnOrder[]
+
+  @@index([code])
+  @@index([email])
+  @@index([phone])
+  @@index([storeId])
+}
+
+enum CustomerType {
+  REGULAR
+  VIP
+  WHOLESALE
+  EMPLOYEE
+}
+
+model CustomerGroup {
+  id              String   @id @default(uuid())
+  code            String   @unique
+  name            String
+  description     String?
+
+  discountPercent Float    @default(0)
+
+  // Sync Information
+  centralGroupId  String?
+  syncStatus      SyncStatus @default(SYNCED)
+  lastSyncedAt    DateTime?
+
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  customers       Customer[]
+
+  @@index([code])
+}
+
+model CustomerAddress {
+  id              String   @id @default(uuid())
+  customerId      String
+  customer        Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  type            AddressType
+  addressLine1    String
+  addressLine2    String?
+  city            String
+  state           String?
+  zipCode         String
+  country         String   @default("US")
+
+  isDefault       Boolean  @default(false)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([customerId])
+}
+
+enum AddressType {
+  BILLING
+  SHIPPING
+  BOTH
+}
+
+// ============================================
+// PRODUCT CATALOG
+// ============================================
+
+model Product {
+  id              String   @id @default(uuid())
+  code            String   @unique
+  name            String
+  description     String?
+
+  categoryId      String?
+  category        Category? @relation(fields: [categoryId], references: [id])
+
+  brandId         String?
+  brand           Brand?   @relation(fields: [brandId], references: [id])
+
+  type            ProductType @default(SIMPLE)
+
+  taxCategoryId   String?
+  taxCategory     TaxCategory? @relation(fields: [taxCategoryId], references: [id])
+
+  imageUrl        String?
+
+  // Sync Information
+  centralProductId String?
+  syncStatus      SyncStatus @default(SYNCED)
+  lastSyncedAt    DateTime?
+  pendingSync     Boolean  @default(false)
+  version         Int      @default(1)
+
+  storeId         String?
+  store           Store?   @relation(fields: [storeId], references: [id])
+
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relationships
+  variants        ProductVariant[]
+
+  @@index([code])
+  @@index([name])
+  @@index([storeId])
+}
+
+enum ProductType {
+  SIMPLE
+  VARIABLE
+  COMBO
+}
+
+model ProductVariant {
+  id              String   @id @default(uuid())
+  productId       String
+  product         Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  sku             String   @unique
+  name            String?
+
+  // Pricing
+  cost            Float    @default(0)
+  price           Float
+  compareAtPrice  Float?
+
+  // Variant attributes
+  color           String?
+  size            String?
+  material        String?
+
+  barcode         String?  @unique
+  upc             String?
+  ean             String?
+
+  weight          Float?
+  weightUnit      String?
+
+  // Sync Information
+  centralVariantId String?
+  syncStatus      SyncStatus @default(SYNCED)
+  lastSyncedAt    DateTime?
+  version         Int      @default(1)
+
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relationships
+  inventoryItems  InventoryItem[]
+  saleOrderLines  SaleOrderLine[]
+  returnOrderLines ReturnOrderLine[]
+  stockAdjustmentLines StockAdjustmentLine[]
+  stockTransferLines StockTransferLine[]
+
+  @@index([productId])
+  @@index([sku])
+  @@index([barcode])
+}
+
+model Category {
+  id              String   @id @default(uuid())
+  code            String   @unique
+  name            String
+  description     String?
+
+  parentId        String?
+  parent          Category? @relation("SubCategories", fields: [parentId], references: [id])
+  children        Category[] @relation("SubCategories")
+
+  // Sync Information
+  centralCategoryId String?
+  syncStatus      SyncStatus @default(SYNCED)
+  lastSyncedAt    DateTime?
+
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  products        Product[]
+
+  @@index([code])
+}
+
+model Brand {
+  id              String   @id @default(uuid())
+  code            String   @unique
+  name            String
+  description     String?
+
+  // Sync Information
+  centralBrandId  String?
+  syncStatus      SyncStatus @default(SYNCED)
+  lastSyncedAt    DateTime?
+
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  products        Product[]
+
+  @@index([code])
+}
+
+// ============================================
+// INVENTORY MANAGEMENT
+// ============================================
+
+model InventoryItem {
+  id              String   @id @default(uuid())
+  variantId       String
+  variant         ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  locationId      String
+  location        Location @relation(fields: [locationId], references: [id])
+
+  quantityOnHand  Int      @default(0)
+  quantityReserved Int     @default(0)
+  quantityAvailable Int    @default(0)
+
+  reorderPoint    Int?
+  reorderQuantity Int?
+
+  lastCountedAt   DateTime?
+  lastReceivedAt  DateTime?
+
+  // Sync Information
+  syncStatus      SyncStatus @default(SYNCED)
+  lastSyncedAt    DateTime?
+  pendingSync     Boolean  @default(false)
+  version         Int      @default(1)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([variantId, locationId])
+  @@index([locationId])
+  @@index([variantId])
+}
+
+model StockAdjustment {
+  id              String   @id @default(uuid())
+  locationId      String
+  location        Location @relation(fields: [locationId], references: [id])
+  adjustmentType  StockAdjustmentType
+  reason          String?
+  referenceNumber String?
+  notes           String?
+  adjustedBy      String?
+  adjustedAt      DateTime @default(now())
+
+  // Sync Information
+  syncStatus      SyncStatus @default(PENDING)
+  lastSyncedAt    DateTime?
+  pendingSync     Boolean  @default(true)
+
+  lineItems       StockAdjustmentLine[]
+
+  createdAt       DateTime @default(now())
+}
+
+enum StockAdjustmentType {
+  INCREASE
+  DECREASE
+  STOCK_TAKE
+  DAMAGED
+  EXPIRED
+}
+
+model StockAdjustmentLine {
+  id               String   @id @default(uuid())
+  adjustmentId     String
+  adjustment       StockAdjustment @relation(fields: [adjustmentId], references: [id], onDelete: Cascade)
+  variantId        String
+  variant          ProductVariant @relation(fields: [variantId], references: [id])
+  quantityBefore   Int
+  quantityAfter    Int
+  quantityChange   Int
+
+  @@index([adjustmentId])
+  @@index([variantId])
+}
+
+model StockTransfer {
+  id              String   @id @default(uuid())
+  fromLocationId  String
+  fromLocation    Location @relation("FromLocation", fields: [fromLocationId], references: [id])
+  toLocationId    String
+  toLocation      Location @relation("ToLocation", fields: [toLocationId], references: [id])
+  transferNumber  String   @unique
+  status          TransferStatus @default(DRAFT)
+  transferDate    DateTime @default(now())
+  notes           String?
+  createdBy       String?
+
+  // Sync Information
+  syncStatus      SyncStatus @default(PENDING)
+  lastSyncedAt    DateTime?
+  pendingSync     Boolean  @default(true)
+
+  lineItems       StockTransferLine[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([fromLocationId])
+  @@index([toLocationId])
+}
+
+enum TransferStatus {
+  DRAFT
+  PENDING
+  IN_TRANSIT
+  RECEIVED
+  CANCELLED
+}
+
+model StockTransferLine {
+  id          String   @id @default(uuid())
+  transferId  String
+  transfer    StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  variantId   String
+  variant     ProductVariant @relation(fields: [variantId], references: [id])
+  quantity    Int
+  received    Int?
+
+  @@index([transferId])
+  @@index([variantId])
+}
+
+// ============================================
+// SALES & TRANSACTIONS
+// ============================================
+
+model SaleOrder {
+  id              String   @id @default(uuid())
+  locationId      String
+  location        Location @relation(fields: [locationId], references: [id])
+  terminalId      String?
+  terminal        Terminal? @relation(fields: [terminalId], references: [id])
+
+  orderNumber     String   @unique
+  type            OrderType @default(SALE)
+  status          OrderStatus @default(OPEN)
+  source          OrderSource @default(POS)
+
+  customerId      String?
+  customer        Customer? @relation(fields: [customerId], references: [id])
+
+  shiftId         String?
+  shift           Shift?   @relation(fields: [shiftId], references: [id])
+
+  userId          String?  // Cashier
+
+  // Amounts
+  subtotal        Float    @default(0)
+  taxAmount       Float    @default(0)
+  discountAmount  Float    @default(0)
+  total           Float    @default(0)
+
+  discountReason  String?
+  notes           String?
+
+  completedAt     DateTime?
+  voidedAt        DateTime?
+  voidReason      String?
+
+  receiptPrinted  Boolean  @default(false)
+  receiptEmailed  Boolean  @default(false)
+  receiptPrintedAt DateTime?
+  receiptEmailedAt DateTime?
+
+  storeId         String?
+  store           Store?   @relation(fields: [storeId], references: [id])
+
+  // Sync Information
+  syncStatus      SyncStatus @default(PENDING)
+  lastSyncedAt    DateTime?
+  syncAttempts    Int      @default(0)
+  version         Int      @default(1)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relationships
+  lines           SaleOrderLine[]
+  payments        Payment[]
+  discounts       Discount[]
+  returnOrders    ReturnOrder[]
+  parkedOrders    ParkedOrder[]
+  exchangesFrom   ExchangeOrder[] @relation("ExchangeOriginal")
+  exchangesTo     ExchangeOrder[] @relation("ExchangeNew")
+
+  @@index([orderNumber])
+  @@index([locationId])
+  @@index([customerId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([storeId])
+}
+
+enum OrderType {
+  SALE
+  RETURN
+  EXCHANGE
+}
+
+enum OrderStatus {
+  OPEN
+  COMPLETED
+  VOIDED
+  PARKED
+}
+
+enum OrderSource {
+  POS
+  ONLINE
+  MOBILE
+}
+
+model SaleOrderLine {
+  id              String   @id @default(uuid())
+  orderId         String
+  order           SaleOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  variantId       String
+  variant         ProductVariant @relation(fields: [variantId], references: [id])
+
+  quantity        Int
+  unitPrice       Float
+  discountAmount  Float    @default(0)
+  taxAmount       Float    @default(0)
+  lineTotal       Float
+
+  notes           String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([orderId])
+  @@index([variantId])
+}
+
+model Payment {
+  id              String   @id @default(uuid())
+  orderId         String
+  order           SaleOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  method          PaymentMethod
+  amount          Float
+
+  reference       String?
+  cardLast4       String?
+  cardBrand       String?
+
+  status          PaymentStatus @default(COMPLETED)
+
+  // Sync Information
+  syncStatus      SyncStatus @default(PENDING)
+  lastSyncedAt    DateTime?
+
+  processedAt     DateTime @default(now())
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([orderId])
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  BANK_TRANSFER
+  GIFT_CARD
+  STORE_CREDIT
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+model Discount {
+  id              String   @id @default(uuid())
+  orderId         String
+  order           SaleOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  type            DiscountType
+  name            String
+  code            String?
+  amount          Float
+
+  // Sync Information
+  syncStatus      SyncStatus @default(PENDING)
+  lastSyncedAt    DateTime?
+
+  createdAt       DateTime @default(now())
+
+  @@index([orderId])
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED_AMOUNT
+  COUPON
+}
+
+// ============================================
+// RETURNS & EXCHANGES
+// ============================================
+
+model ReturnOrder {
+  id              String   @id @default(uuid())
+  returnNumber    String   @unique
+  originalOrderId String
+  originalOrder   SaleOrder @relation(fields: [originalOrderId], references: [id])
+  customerId      String?
+  customer        Customer? @relation(fields: [customerId], references: [id])
+  locationId      String
+  location        Location @relation(fields: [locationId], references: [id])
+
+  reason          String?
+  notes           String?
+
+  subtotal        Float    @default(0)
+  taxAmount       Float    @default(0)
+  total           Float    @default(0)
+
+  refundMethod    RefundMethod?
+  refundAmount    Float    @default(0)
+
+  status          ReturnStatus @default(PENDING)
+
+  // Sync Information
+  syncStatus      SyncStatus @default(PENDING)
+  lastSyncedAt    DateTime?
+  syncAttempts    Int      @default(0)
+
+  processedBy     String?
+  processedAt     DateTime?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  lines           ReturnOrderLine[]
+
+  @@index([returnNumber])
+  @@index([originalOrderId])
+}
+
+enum RefundMethod {
+  ORIGINAL_PAYMENT
+  STORE_CREDIT
+  CASH
+}
+
+enum ReturnStatus {
+  PENDING
+  COMPLETED
+  REJECTED
+}
+
+model ReturnOrderLine {
+  id              String   @id @default(uuid())
+  returnOrderId   String
+  returnOrder     ReturnOrder @relation(fields: [returnOrderId], references: [id], onDelete: Cascade)
+  variantId       String
+  variant         ProductVariant @relation(fields: [variantId], references: [id])
+
+  quantity        Int
+  unitPrice       Float
+  lineTotal       Float
+
+  reason          String?
+
+  createdAt       DateTime @default(now())
+
+  @@index([returnOrderId])
+  @@index([variantId])
+}
+
+model ExchangeOrder {
+  id               String   @id @default(uuid())
+  exchangeNumber   String   @unique
+  originalOrderId  String
+  originalOrder    SaleOrder @relation("ExchangeOriginal", fields: [originalOrderId], references: [id])
+  newOrderId       String
+  newOrder         SaleOrder @relation("ExchangeNew", fields: [newOrderId], references: [id])
+  priceDifference  Float    @default(0)
+  additionalPayment Float   @default(0)
+  refundAmount     Float    @default(0)
+  processedBy      String?
+  processedAt      DateTime @default(now())
+
+  // Sync Information
+  syncStatus      SyncStatus @default(PENDING)
+  lastSyncedAt    DateTime?
+
+  @@index([originalOrderId])
+  @@index([newOrderId])
+}
+
+model ParkedOrder {
+  id          String   @id @default(uuid())
+  parkNumber  String   @unique
+  orderId     String
+  order       SaleOrder @relation(fields: [orderId], references: [id])
+  customerId  String?
+  parkedBy    String?
+  parkedAt    DateTime @default(now())
+  expiryDate  DateTime?
+  notes       String?
+
+  // Sync Information
+  syncStatus  SyncStatus @default(PENDING)
+  lastSyncedAt DateTime?
+
+  @@index([orderId])
+}
+
+// ============================================
+// SHIFT MANAGEMENT
+// ============================================
+
+model Shift {
+  id              String   @id @default(uuid())
+  shiftNumber     String   @unique
+  locationId      String
+  location        Location @relation(fields: [locationId], references: [id])
+  terminalId      String?
+  terminal        Terminal? @relation(fields: [terminalId], references: [id])
+  userId          String
+
+  registerId      String?
+
+  openingCash     Float    @default(0)
+  closingCash     Float?
+  expectedCash    Float?
+  cashDifference  Float?
+
+  // Sales summary
+  totalSales      Float    @default(0)
+  totalRefunds    Float    @default(0)
+  totalTransactions Int    @default(0)
+
+  openedAt        DateTime @default(now())
+  closedAt        DateTime?
+
+  status          ShiftStatus @default(OPEN)
+
+  // Sync Information
+  syncStatus      SyncStatus @default(PENDING)
+  lastSyncedAt    DateTime?
+  syncAttempts    Int      @default(0)
+
+  storeId         String?
+  store           Store?   @relation(fields: [storeId], references: [id])
+
+  notes           String?
+
+  saleOrders      SaleOrder[]
+
+  @@index([shiftNumber])
+  @@index([locationId])
+  @@index([status])
+  @@index([storeId])
+}
+
+enum ShiftStatus {
+  OPEN
+  CLOSED
+}
+
+// ============================================
+// TAX CONFIGURATION
+// ============================================
+
+model TaxCategory {
+  id              String   @id @default(uuid())
+  code            String   @unique
+  name            String
+  description     String?
+
+  // Sync Information
+  centralTaxCategoryId String?
+  syncStatus      SyncStatus @default(SYNCED)
+  lastSyncedAt    DateTime?
+
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  products        Product[]
+  rates           TaxRate[]
+
+  @@index([code])
+}
+
+model TaxRate {
+  id              String   @id @default(uuid())
+  taxCategoryId   String
+  taxCategory     TaxCategory @relation(fields: [taxCategoryId], references: [id], onDelete: Cascade)
+
+  name            String
+  rate            Float
+
+  country         String?
+  state           String?
+
+  isActive        Boolean  @default(true)
+  effectiveFrom   DateTime @default(now())
+  effectiveTo     DateTime?
+
+  // Sync Information
+  syncStatus      SyncStatus @default(SYNCED)
+  lastSyncedAt    DateTime?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([taxCategoryId])
+}
+
+// ============================================
+// LOCAL SETTINGS
+// ============================================
+
+model LocalSettings {
+  id              String   @id @default(uuid())
+  key             String   @unique
+  value           String
+  category        String   @default("GENERAL")
+  description     String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([key])
+  @@index([category])
+}
+
