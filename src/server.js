@@ -1,6 +1,7 @@
 const http = require('http');
 const { app } = require('./app');
 const { initSocket } = require('./lib/socket');
+const { startHourly } = require('./modules/sync/cron');
 
 const PORT = process.env.PORT || 4000;
 
@@ -19,6 +20,7 @@ server.listen(PORT, () => {
   const bottom = '└' + '─'.repeat(width) + '┘';
   const body = lines.map(l => '│ ' + l.padEnd(width - 1, ' ') + '│').join('\n');
   console.log(`\n${top}\n${body}\n${bottom}\n`);
+  startHourly();
 });
 
 

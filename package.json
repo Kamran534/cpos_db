@@ -15,7 +15,8 @@
     "prisma:studio:payflow": "prisma studio --schema=./prisma/schema.payflow.prisma",
     "prisma:format": "prisma format",
     "prisma:db:push": "prisma db push",
-    "prisma:pull": "prisma db pull"
+    "prisma:pull": "prisma db pull",
+    "compare:schemas": "node scripts/compare-schemas.js"
   },
   "keywords": [
     "csu",

@@ -1,4 +1,6 @@
-const { PrismaClient } = require('@prisma/client');
+// Use the generated Prisma client output path configured in prisma/schema.prisma
+// This project generates to node_modules/.prisma/client
+const { PrismaClient } = require('../../node_modules/.prisma/client');
 
 const POSTGRES_URL_REMOTE = process.env.POSTGRES_URL_REMOTE || process.env.POSTGRES_URL;
 
