@@ -32,6 +32,34 @@ const modelFieldMappers = {
       imageUrl: mapImageRemoteToLocal(row.imageUrl),
     }),
   },
+  Category: {
+    toRemote: (row) => ({
+      ...row,
+      imageUrl: mapImageLocalToRemote(row.imageUrl),
+    }),
+    toLocal: (row) => ({
+      ...row,
+      imageUrl: mapImageRemoteToLocal(row.imageUrl),
+    }),
+  },
+  Brand: {
+    toRemote: (row) => ({
+      ...row,
+      logoUrl: row.logoUrl, // Already a string
+    }),
+    toLocal: (row) => ({
+      ...row,
+      logoUrl: row.logoUrl, // Already a string
+    }),
+  },
+  Terminal: {
+    toRemote: (row) => row,
+    toLocal: (row) => {
+      // SQLite Terminal schema doesn't have these PostgreSQL-only fields
+      const { locationId, syncStatus, registeredBy, ...rest } = row;
+      return rest;
+    },
+  },
 };
 
 function applyEnumMap(direction, obj) {

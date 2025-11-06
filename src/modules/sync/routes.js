@@ -28,6 +28,14 @@ const router = Router();
  *           default: both
  *         required: false
  *         description: "Type of sync operation to perform"
+ *       - in: query
+ *         name: fullSync
+ *         schema:
+ *           type: string
+ *           enum: [true, false]
+ *           default: false
+ *         required: false
+ *         description: "Set to 'true' to pull all data from the beginning (ignores last sync timestamp). Useful for initial sync or recovering missing data."
  *     responses:
  *       200:
  *         description: Sync operation completed successfully
@@ -121,8 +129,8 @@ const router = Router();
  */
 router.post('/execute', requireAuth, async (req, res, next) => {
   try {
-    const { operation = 'both' } = req.query;
-    
+    const { operation = 'both', fullSync = 'false' } = req.query;
+
     // Validate operation type
     if (!['push', 'pull', 'both'].includes(operation)) {
       return res.status(400).json({
@@ -132,9 +140,13 @@ router.post('/execute', requireAuth, async (req, res, next) => {
         }
       });
     }
-    
-    const stats = await runSync(operation);
-    return res.json({ status: 'ok', operation, stats });
+
+    const options = {
+      fullSync: fullSync === 'true' || fullSync === '1'
+    };
+
+    const stats = await runSync(operation, options);
+    return res.json({ status: 'ok', operation, fullSync: options.fullSync, stats });
   } catch (e) {
     next(e);
   }

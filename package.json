@@ -16,7 +16,9 @@
     "prisma:format": "prisma format",
     "prisma:db:push": "prisma db push",
     "prisma:pull": "prisma db pull",
-    "compare:schemas": "node scripts/compare-schemas.js"
+    "compare:schemas": "node scripts/compare-schemas.js",
+    "images:download": "node scripts/download-images.js",
+    "seed": "prisma db seed"
   },
   "keywords": [
     "csu",

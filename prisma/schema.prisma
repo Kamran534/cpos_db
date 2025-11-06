@@ -488,7 +488,7 @@ model Product {
   taxCategoryId   String?
   taxCategory     TaxCategory? @relation(fields: [taxCategoryId], references: [id])
 
-  imageUrl        String[]
+  imageUrl        String?
 
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
@@ -570,7 +570,7 @@ model Category {
   code            String   @unique
   name            String
   description     String?
-  imageUrl        String[]
+  imageUrl        String?
 
   parentId        String?
   parent          Category? @relation("SubCategories", fields: [parentId], references: [id])

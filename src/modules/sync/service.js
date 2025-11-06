@@ -30,9 +30,24 @@ const SYNC_CONFIG = {
   SYNC_LOG_ENABLED: process.env.SYNC_LOG_ENABLED !== 'false',
   
   // Models to sync (comma-separated or use default)
-  SYNC_MODELS: process.env.SYNC_MODELS 
+  SYNC_MODELS: process.env.SYNC_MODELS
     ? process.env.SYNC_MODELS.split(',').map(m => m.trim())
-    : ['Customer', 'Product', 'ProductVariant', 'SaleOrder', 'SaleOrderLine', 'Payment', 'Discount', 'ReturnOrder', 'ReturnOrderLine', 'Category', 'Brand', 'InventoryItem', 'StockAdjustment', 'StockAdjustmentLine', 'StockTransfer', 'StockTransferLine', 'ParkedOrder', 'Shift', 'TaxCategory', 'TaxRate'],
+    : [
+      // Parent models first (no dependencies)
+      'TaxCategory', 'TaxRate', 'Category', 'Brand', 'CustomerGroup',
+      'Location', 'Terminal', 'User',
+      // Models with parents
+      'Customer', 'Product', 'ProductVariant',
+      // Inventory & stock (needs Location)
+      'InventoryItem', 'StockAdjustment', 'StockAdjustmentLine', 'StockTransfer', 'StockTransferLine',
+      // Shift (needs Location, Terminal, User)
+      'Shift',
+      // Orders & related (depend on Customer, Product, ProductVariant, Location, Terminal, User, Shift)
+      'SaleOrder', 'SaleOrderLine', 'Payment', 'Discount',
+      'ReturnOrder', 'ReturnOrderLine',
+      // Other
+      'ParkedOrder'
+    ],
 };
 
 // Models to sync bidirectionally
@@ -40,7 +55,7 @@ const SYNC_MODELS = SYNC_CONFIG.SYNC_MODELS;
 
 // Minimal per-model primary key field name map
 const MODEL_PK = {
-  Customer: 'id', Product: 'id', ProductVariant: 'id', SaleOrder: 'id', SaleOrderLine: 'id', Payment: 'id', Discount: 'id', ReturnOrder: 'id', ReturnOrderLine: 'id', Category: 'id', Brand: 'id', InventoryItem: 'id', StockAdjustment: 'id', StockAdjustmentLine: 'id', StockTransfer: 'id', StockTransferLine: 'id', ParkedOrder: 'id', Shift: 'id', TaxCategory: 'id', TaxRate: 'id'
+  CustomerGroup: 'id', Customer: 'id', Product: 'id', ProductVariant: 'id', SaleOrder: 'id', SaleOrderLine: 'id', Payment: 'id', Discount: 'id', ReturnOrder: 'id', ReturnOrderLine: 'id', Category: 'id', Brand: 'id', InventoryItem: 'id', StockAdjustment: 'id', StockAdjustmentLine: 'id', StockTransfer: 'id', StockTransferLine: 'id', ParkedOrder: 'id', Shift: 'id', TaxCategory: 'id', TaxRate: 'id', Location: 'id', Terminal: 'id', User: 'id'
 };
 
 // Utility to get prisma delegates by model name
@@ -63,47 +78,153 @@ async function setLastSyncAt(date = new Date()) {
   await localDb.localSettings.upsert({ where: { key }, create: { key, value, category: 'SYNC' }, update: { value } });
 }
 
-async function pullOnce() {
+async function pullOnce(options = {}) {
   if (!SYNC_CONFIG.SYNC_ENABLED) {
     return { processed: 0, failed: 0, models: {}, message: 'Sync is disabled' };
   }
-  
+
   const stats = { processed: 0, failed: 0, models: {} };
-  const since = await getLastSyncAt();
+  // If fullSync is true, pull all data from beginning of time
+  const since = options.fullSync ? new Date(0) : await getLastSyncAt();
   const now = new Date();
-  
+
   if (SYNC_CONFIG.SYNC_LOG_ENABLED) {
-    console.log(`[sync-pull] Starting pull sync from ${since.toISOString()}`);
+    console.log(`[sync-pull] Starting ${options.fullSync ? 'FULL' : 'incremental'} pull sync from ${since.toISOString()}`);
   }
   
+  // Build where filters per model, accounting for models without timestamp fields
+  function buildSinceWhere(model, since) {
+    switch (model) {
+      case 'CustomerGroup':
+      case 'Customer':
+      case 'Product':
+      case 'ProductVariant':
+      case 'SaleOrder':
+      case 'SaleOrderLine':
+      case 'Payment':
+      case 'Category':
+      case 'Brand':
+      case 'InventoryItem':
+      case 'StockTransfer':
+      case 'TaxCategory':
+      case 'TaxRate':
+      case 'Location':
+      case 'User':
+        return { updatedAt: { gt: since } };
+      case 'Terminal':
+        return { registeredAt: { gt: since } }; // Terminal uses registeredAt instead of updatedAt
+      case 'Discount':
+        return { createdAt: { gt: since } };
+      case 'ReturnOrder':
+        return { updatedAt: { gt: since } };
+      case 'ReturnOrderLine':
+        return { returnOrder: { updatedAt: { gt: since } } };
+      case 'StockAdjustment':
+        return { createdAt: { gt: since } }; // adjustedAt also available, createdAt is reliable
+      case 'StockAdjustmentLine':
+        return { adjustment: { adjustedAt: { gt: since } } };
+      case 'StockTransferLine':
+        return { transfer: { updatedAt: { gt: since } } };
+      case 'ParkedOrder':
+        return { parkedAt: { gt: since } };
+      case 'Shift':
+        return { openedAt: { gt: since } };
+      default:
+        return {}; // fallback: no filter
+    }
+  }
+
+  // Sync models sequentially to respect foreign key dependencies
   for (const model of SYNC_MODELS) {
     const { local, remote } = getDelegates(model);
     if (!local || !remote) continue;
     try {
-      // Remote changed since 'since'
-      const remoteChanges = await remote.findMany({ 
-        where: { updatedAt: { gt: since } }, 
-        take: SYNC_CONFIG.PULL_BATCH_SIZE 
-      });
-      let modelCount = 0;
-      for (const row of remoteChanges) {
-        try {
-          const pk = MODEL_PK[model];
-          const mapped = toLocal(model, row);
-          await local.upsert({ where: { [pk]: row[pk] }, create: mapped, update: mapped });
-          modelCount++;
-          stats.processed++;
-        } catch (e) {
-          stats.failed++;
-          if (SYNC_CONFIG.SYNC_LOG_ENABLED) {
-            console.error(`[pull] Failed to sync ${model} ${row[MODEL_PK[model]]}:`, e.message);
+        // Remote changed since 'since'
+        const where = buildSinceWhere(model, since);
+        const remoteChanges = await remote.findMany({
+          where,
+          take: SYNC_CONFIG.PULL_BATCH_SIZE
+        });
+        let modelCount = 0;
+        for (const row of remoteChanges) {
+          try {
+            const pk = MODEL_PK[model];
+            let mapped = toLocal(model, row);
+
+            // Strip common PostgreSQL-only fields that don't exist in SQLite schema
+            const {
+              // Common fields across multiple models
+              storeId,
+              sourceTerminalId,
+              lastSyncedAt,
+              lastModifiedBy,
+              branchId,     // Location
+              // Model-specific fields
+              city,         // TaxRate
+              style,        // ProductVariant
+              material,     // ProductVariant
+              currency,     // Payment
+              authCode,     // Payment
+              percent,      // Discount
+              imageUrl,     // Category (exists in Product, but different schema in Category)
+              logoUrl,      // Brand
+              // Keep the rest
+              ...cleanMapped
+            } = mapped || {};
+            mapped = cleanMapped;
+
+            await local.upsert({ where: { [pk]: row[pk] }, create: mapped, update: mapped });
+            modelCount++;
+            stats.processed++;
+          } catch (e) {
+            // Handle unique constraint violations
+            if (e.message && e.message.includes('Unique constraint failed')) {
+              try {
+                // For Terminal, try to find and update by apiKey
+                if (model === 'Terminal' && row.apiKey) {
+                  // Recreate mapped object
+                  let retryMapped = toLocal(model, row);
+                  const {
+                    storeId, sourceTerminalId, lastSyncedAt, lastModifiedBy, branchId,
+                    city, style, material, currency, authCode, percent, imageUrl, logoUrl,
+                    ...cleanMapped
+                  } = retryMapped || {};
+                  retryMapped = cleanMapped;
+
+                  const existing = await local.findFirst({ where: { apiKey: row.apiKey } });
+                  if (existing) {
+                    await local.update({ where: { id: existing.id }, data: retryMapped });
+                    modelCount++;
+                    stats.processed++;
+                    if (SYNC_CONFIG.SYNC_LOG_ENABLED) {
+                      console.log(`[sync-pull] Updated existing ${model} with apiKey ${row.apiKey}`);
+                    }
+                    continue;
+                  }
+                }
+                // If we can't handle it, log and count as failed
+                stats.failed++;
+                if (SYNC_CONFIG.SYNC_LOG_ENABLED) {
+                  console.error(`[pull] Failed to sync ${model} ${row[MODEL_PK[model]]}:`, e.message);
+                }
+              } catch (retryError) {
+                stats.failed++;
+                if (SYNC_CONFIG.SYNC_LOG_ENABLED) {
+                  console.error(`[pull] Failed to sync ${model} ${row[MODEL_PK[model]]}:`, retryError.message);
+                }
+              }
+            } else {
+              stats.failed++;
+              if (SYNC_CONFIG.SYNC_LOG_ENABLED) {
+                console.error(`[pull] Failed to sync ${model} ${row[MODEL_PK[model]]}:`, e.message);
+              }
+            }
           }
         }
-      }
-      stats.models[model] = modelCount;
-      if (SYNC_CONFIG.SYNC_LOG_ENABLED && modelCount > 0) {
-        console.log(`[sync-pull] Synced ${modelCount} ${model} records`);
-      }
+        stats.models[model] = modelCount;
+        if (SYNC_CONFIG.SYNC_LOG_ENABLED && modelCount > 0) {
+          console.log(`[sync-pull] Synced ${modelCount} ${model} records`);
+        }
     } catch (e) {
       if (SYNC_CONFIG.SYNC_LOG_ENABLED) {
         console.error(`[pull] Failed to fetch ${model}:`, e.message);
@@ -229,21 +350,21 @@ async function pushOnce() {
   return stats;
 }
 
-async function runSyncBoth() {
+async function runSyncBoth(options = {}) {
   const pushStats = await pushOnce();
-  const pullStats = await pullOnce();
+  const pullStats = await pullOnce(options);
   return { push: pushStats, pull: pullStats };
 }
 
 // Unified sync entrypoint; keeps push/pull internal
-async function runSync(operation = 'both') {
+async function runSync(operation = 'both', options = {}) {
   if (operation === 'push') {
     return await pushOnce();
   }
   if (operation === 'pull') {
-    return await pullOnce();
+    return await pullOnce(options);
   }
-  return await runSyncBoth();
+  return await runSyncBoth(options);
 }
 
 async function getSyncStatus() {
