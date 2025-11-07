@@ -206,3 +206,5 @@ public/uploads/
 *.dump
 *.backup
 
+
+/src/generated/prisma
