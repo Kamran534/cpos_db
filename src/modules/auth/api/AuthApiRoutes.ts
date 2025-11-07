@@ -6,6 +6,8 @@ import { StoreRegistrationService } from '../central/StoreRegistrationService.js
 import { BranchRegistrationService } from '../central/BranchRegistrationService.js';
 import { AuthMiddleware } from '../middleware/AuthMiddleware.js';
 import { PermissionMiddleware } from '../middleware/PermissionMiddleware.js';
+import { ValidationMiddleware } from '../middleware/ValidationMiddleware.js';
+import { AuthErrorHandler } from '../middleware/ErrorHandler.js';
 
 export class AuthApiRoutes {
   private authService: CentralAuthService;
@@ -15,6 +17,7 @@ export class AuthApiRoutes {
   private branchRegistrationService: BranchRegistrationService;
   private authMiddleware: AuthMiddleware;
   private permissionMiddleware: PermissionMiddleware;
+  private validationMiddleware: ValidationMiddleware;
 
   constructor(centralDb: any) {
     this.authService = new CentralAuthService(centralDb);
@@ -24,6 +27,7 @@ export class AuthApiRoutes {
     this.branchRegistrationService = new BranchRegistrationService(centralDb);
     this.authMiddleware = new AuthMiddleware();
     this.permissionMiddleware = new PermissionMiddleware(centralDb);
+    this.validationMiddleware = new ValidationMiddleware();
   }
 
   getRoutes(): Router {
@@ -87,15 +91,10 @@ export class AuthApiRoutes {
      *                   type: string
      *                   example: SUPER_ADMIN_EXISTS
      */
-    router.post('/setup/super-admin', async (req: Request, res: Response) => {
-      try {
+    router.post('/setup/super-admin', 
+      this.validationMiddleware.validateSuperAdminSetup,
+      AuthErrorHandler.asyncHandler(async (req: Request, res: Response) => {
         const { username, email, password, firstName, lastName, phone } = req.body;
-
-        if (!username || !email || !password || !firstName || !lastName) {
-          return res.status(400).json({ 
-            error: 'Missing required fields: username, email, password, firstName, lastName' 
-          });
-        }
 
         const superAdmin = await this.userService.createInitialSuperAdmin({
           username,
@@ -118,17 +117,9 @@ export class AuthApiRoutes {
             role: superAdmin.role
           }
         });
-      } catch (error: any) {
-        // Handle "super admin already exists" case with a clear message
-        if (error.message && error.message.includes('Super admin already exists')) {
-          return res.status(409).json({ 
-            error: 'Super admin already exists. Use the login endpoint or create additional admins via /api/auth/user/create endpoint.',
-            code: 'SUPER_ADMIN_EXISTS'
-          });
-        }
-        res.status(400).json({ error: error.message || 'Failed to create super admin' });
-      }
-    });
+      }),
+      AuthErrorHandler.handleError
+    );
 
     // ============================================
     // AUTHENTICATION ROUTES (No Authentication Required)
@@ -159,8 +150,9 @@ export class AuthApiRoutes {
      *       401:
      *         description: Invalid credentials
      */
-    router.post('/admin/login', async (req: Request, res: Response) => {
-      try {
+    router.post('/admin/login',
+      this.validationMiddleware.validateAdminLogin,
+      AuthErrorHandler.asyncHandler(async (req: Request, res: Response) => {
         const { username, password } = req.body;
         const result = await this.authService.adminLogin(
           username,
@@ -169,10 +161,9 @@ export class AuthApiRoutes {
           req.get('User-Agent') || ''
         );
         res.json(result);
-      } catch (error: any) {
-        res.status(401).json({ error: error.message });
-      }
-    });
+      }),
+      AuthErrorHandler.handleError
+    );
 
     /**
      * @openapi
@@ -197,15 +188,15 @@ export class AuthApiRoutes {
      *       401:
      *         description: Invalid refresh token
      */
-    router.post('/refresh', async (req: Request, res: Response) => {
-      try {
+    router.post('/refresh',
+      this.validationMiddleware.validateRefreshToken,
+      AuthErrorHandler.asyncHandler(async (req: Request, res: Response) => {
         const { refreshToken } = req.body;
         const result = await this.authService.refreshToken(refreshToken);
         res.json(result);
-      } catch (error: any) {
-        res.status(401).json({ error: error.message });
-      }
-    });
+      }),
+      AuthErrorHandler.handleError
+    );
 
     /**
      * @openapi
@@ -220,15 +211,15 @@ export class AuthApiRoutes {
      *       200:
      *         description: Logout successful
      */
-    router.post('/logout', this.authMiddleware.authenticateUser, async (req: Request, res: Response) => {
-      try {
+    router.post('/logout',
+      this.authMiddleware.authenticateUser,
+      AuthErrorHandler.asyncHandler(async (req: Request, res: Response) => {
         const token = req.headers.authorization!.substring(7);
         await this.authService.logout(req.user!.userId, token);
         res.json({ success: true });
-      } catch (error: any) {
-        res.status(400).json({ error: error.message });
-      }
-    });
+      }),
+      AuthErrorHandler.handleError
+    );
 
     // ============================================
     // TERMINAL ROUTES (No Authentication Required for activate/authenticate)
@@ -261,18 +252,25 @@ export class AuthApiRoutes {
      *       401:
      *         description: Authentication failed
      */
-    router.post('/terminal/authenticate', async (req: Request, res: Response) => {
-      try {
+    router.post('/terminal/authenticate',
+      AuthErrorHandler.asyncHandler(async (req: Request, res: Response) => {
         const { apiKey, macAddress, ipAddress } = req.body;
+        
+        if (!apiKey) {
+          return res.status(400).json({ error: 'apiKey is required' });
+        }
+        if (!macAddress) {
+          return res.status(400).json({ error: 'macAddress is required' });
+        }
+        
         const result = await this.authService.authenticateTerminal(apiKey, {
           macAddress,
           ipAddress: ipAddress || req.ip || 'unknown'
         });
         res.json(result);
-      } catch (error: any) {
-        res.status(401).json({ error: error.message });
-      }
-    });
+      }),
+      AuthErrorHandler.handleError
+    );
 
     /**
      * @openapi
@@ -301,18 +299,18 @@ export class AuthApiRoutes {
      *       400:
      *         description: Activation failed
      */
-    router.post('/terminal/activate', async (req: Request, res: Response) => {
-      try {
+    router.post('/terminal/activate',
+      this.validationMiddleware.validateTerminalActivation,
+      AuthErrorHandler.asyncHandler(async (req: Request, res: Response) => {
         const { activationCode, macAddress, ipAddress } = req.body;
         const result = await this.authService.activateTerminal(activationCode, {
           macAddress,
           ipAddress: ipAddress || req.ip || 'unknown'
         });
         res.json(result);
-      } catch (error: any) {
-        res.status(400).json({ error: error.message });
-      }
-    });
+      }),
+      AuthErrorHandler.handleError
+    );
 
     // ============================================
     // SUPER ADMIN ROUTES (Requires SUPER_ADMIN role)
@@ -346,14 +344,12 @@ export class AuthApiRoutes {
     router.post('/store/register',
       this.authMiddleware.authenticateUser,
       this.permissionMiddleware.requireRole(['SUPER_ADMIN']),
-      async (req: Request, res: Response) => {
-        try {
-          const store = await this.storeRegistrationService.registerStore(req.user!.userId, req.body);
-          res.json({ success: true, store });
-        } catch (error: any) {
-          res.status(400).json({ error: error.message });
-        }
-      }
+      this.validationMiddleware.validateStoreRegistration,
+      AuthErrorHandler.asyncHandler(async (req: Request, res: Response) => {
+        const store = await this.storeRegistrationService.registerStore(req.user!.userId, req.body);
+        res.json({ success: true, store });
+      }),
+      AuthErrorHandler.handleError
     );
 
     // ============================================
@@ -390,14 +386,12 @@ export class AuthApiRoutes {
     router.post('/branch/register',
       this.authMiddleware.authenticateUser,
       this.permissionMiddleware.requireRole(['SUPER_ADMIN', 'STORE_MANAGER']),
-      async (req: Request, res: Response) => {
-        try {
-          const branch = await this.branchRegistrationService.registerBranch(req.user!.userId, req.body);
-          res.json({ success: true, branch });
-        } catch (error: any) {
-          res.status(400).json({ error: error.message });
-        }
-      }
+      this.validationMiddleware.validateBranchRegistration,
+      AuthErrorHandler.asyncHandler(async (req: Request, res: Response) => {
+        const branch = await this.branchRegistrationService.registerBranch(req.user!.userId, req.body);
+        res.json({ success: true, branch });
+      }),
+      AuthErrorHandler.handleError
     );
 
     /**
@@ -460,14 +454,12 @@ export class AuthApiRoutes {
     router.post('/terminal/register',
       this.authMiddleware.authenticateUser,
       this.permissionMiddleware.requireRole(['SUPER_ADMIN', 'STORE_MANAGER']),
-      async (req: Request, res: Response) => {
-        try {
-          const result = await this.terminalRegistrationService.registerTerminal(req.user!.userId, req.body);
-          res.json(result);
-        } catch (error: any) {
-          res.status(400).json({ error: error.message });
-        }
-      }
+      this.validationMiddleware.validateTerminalRegistration,
+      AuthErrorHandler.asyncHandler(async (req: Request, res: Response) => {
+        const result = await this.terminalRegistrationService.registerTerminal(req.user!.userId, req.body);
+        res.json(result);
+      }),
+      AuthErrorHandler.handleError
     );
 
     /**
@@ -506,22 +498,19 @@ export class AuthApiRoutes {
      */
     router.get('/terminal/list',
       this.authMiddleware.authenticateUser,
-      async (req: Request, res: Response) => {
-        try {
-          const { storeId } = req.query;
-          const result = await this.terminalRegistrationService.listTerminals(
-            storeId as string,
-            req.user!.userId
-          );
-          res.json({ 
-            success: true, 
-            terminals: result.terminals,
-            totalCount: result.totalCount
-          });
-        } catch (error: any) {
-          res.status(400).json({ error: error.message });
-        }
-      }
+      AuthErrorHandler.asyncHandler(async (req: Request, res: Response) => {
+        const { storeId } = req.query;
+        const result = await this.terminalRegistrationService.listTerminals(
+          storeId as string,
+          req.user!.userId
+        );
+        res.json({ 
+          success: true, 
+          terminals: result.terminals,
+          totalCount: result.totalCount
+        });
+      }),
+      AuthErrorHandler.handleError
     );
 
     /**
@@ -562,14 +551,12 @@ export class AuthApiRoutes {
     router.post('/user/create',
       this.authMiddleware.authenticateUser,
       this.permissionMiddleware.requireRole(['SUPER_ADMIN', 'STORE_MANAGER']),
-      async (req: Request, res: Response) => {
-        try {
-          const user = await this.userService.createUser(req.user!.userId, req.body);
-          res.json({ success: true, user });
-        } catch (error: any) {
-          res.status(400).json({ error: error.message });
-        }
-      }
+      this.validationMiddleware.validateUserCreation,
+      AuthErrorHandler.asyncHandler(async (req: Request, res: Response) => {
+        const user = await this.userService.createUser(req.user!.userId, req.body);
+        res.json({ success: true, user });
+      }),
+      AuthErrorHandler.handleError
     );
 
     /**
@@ -608,19 +595,16 @@ export class AuthApiRoutes {
      */
     router.get('/user/list',
       this.authMiddleware.authenticateUser,
-      async (req: Request, res: Response) => {
-        try {
-          const { storeId } = req.query;
-          const result = await this.userService.listUsers(storeId as string, req.user!.userId);
-          res.json({ 
-            success: true, 
-            users: result.users,
-            totalCount: result.totalCount
-          });
-        } catch (error: any) {
-          res.status(400).json({ error: error.message });
-        }
-      }
+      AuthErrorHandler.asyncHandler(async (req: Request, res: Response) => {
+        const { storeId } = req.query;
+        const result = await this.userService.listUsers(storeId as string, req.user!.userId);
+        res.json({ 
+          success: true, 
+          users: result.users,
+          totalCount: result.totalCount
+        });
+      }),
+      AuthErrorHandler.handleError
     );
 
     // ============================================
@@ -654,15 +638,13 @@ export class AuthApiRoutes {
      */
     router.post('/user/change-password',
       this.authMiddleware.authenticateUser,
-      async (req: Request, res: Response) => {
-        try {
-          const { currentPassword, newPassword } = req.body;
-          await this.userService.changePassword(req.user!.userId, currentPassword, newPassword);
-          res.json({ success: true });
-        } catch (error: any) {
-          res.status(400).json({ error: error.message });
-        }
-      }
+      this.validationMiddleware.validatePasswordChange,
+      AuthErrorHandler.asyncHandler(async (req: Request, res: Response) => {
+        const { currentPassword, newPassword } = req.body;
+        await this.userService.changePassword(req.user!.userId, currentPassword, newPassword);
+        res.json({ success: true, message: 'Password changed successfully' });
+      }),
+      AuthErrorHandler.handleError
     );
 
     /**
@@ -687,15 +669,26 @@ export class AuthApiRoutes {
      *       200:
      *         description: Password reset email sent (if account exists)
      */
-    router.post('/user/request-password-reset', async (req: Request, res: Response) => {
-      try {
+    router.post('/user/request-password-reset',
+      AuthErrorHandler.asyncHandler(async (req: Request, res: Response) => {
         const { email } = req.body;
+        if (!email) {
+          return res.status(400).json({ 
+            error: 'Email is required',
+            code: 'VALIDATION_ERROR'
+          });
+        }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          return res.status(400).json({ 
+            error: 'Invalid email format',
+            code: 'VALIDATION_ERROR'
+          });
+        }
         const result = await this.userService.requestPasswordReset(email);
         res.json(result);
-      } catch (error: any) {
-        res.status(400).json({ error: error.message });
-      }
-    });
+      }),
+      AuthErrorHandler.handleError
+    );
 
     return router;
   }

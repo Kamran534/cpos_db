@@ -26,6 +26,9 @@ export { ApiKeyService } from './security/ApiKeyService.js';
 export { AuthMiddleware } from './middleware/AuthMiddleware.js';
 export { PermissionMiddleware } from './middleware/PermissionMiddleware.js';
 export { TerminalMiddleware } from './middleware/TerminalMiddleware.js';
+export { ValidationMiddleware } from './middleware/ValidationMiddleware.js';
+export { AuthErrorHandler } from './middleware/ErrorHandler.js';
+export * as authValidation from './validation/authValidation.js';
 
 // API Routes
 export { AuthApiRoutes } from './api/AuthApiRoutes.js';

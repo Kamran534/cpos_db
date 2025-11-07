@@ -48,10 +48,35 @@ async function autoSyncOnStartup() {
     
     if (terminals.length === 0) {
       console.log('[Auto-Sync] No active terminals found');
+      // Debug: Check all terminals to see why none are active
+      try {
+        const allTerminals = await remoteDb.terminal.findMany({
+          select: {
+            id: true,
+            terminalCode: true,
+            terminalName: true,
+            isActive: true,
+            status: true
+          }
+        });
+        if (allTerminals.length > 0) {
+          console.log(`[Auto-Sync] Debug: Found ${allTerminals.length} terminal(s) in database:`);
+          allTerminals.forEach((t: any) => {
+            console.log(`  - ${t.terminalCode}: isActive=${t.isActive}, status=${t.status}`);
+          });
+        } else {
+          console.log('[Auto-Sync] Debug: No terminals found in database at all');
+        }
+      } catch (debugError: any) {
+        console.error('[Auto-Sync] Debug error:', debugError.message);
+      }
       return;
     }
 
-    console.log(`[Auto-Sync] Found ${terminals.length} active terminal(s)`);
+    console.log(`[Auto-Sync] Found ${terminals.length} active terminal(s):`);
+    terminals.forEach((t: any) => {
+      console.log(`  - ${t.terminalCode} (${t.id}): status=${t.status}`);
+    });
     
     // Notify all terminals via socket.io to trigger sync
     const io = getIo();
@@ -78,6 +103,7 @@ async function autoSyncOnStartup() {
     console.log('[Auto-Sync] Auto-sync completed');
   } catch (error: any) {
     console.error('[Auto-Sync] Error during auto-sync:', error.message);
+    console.error('[Auto-Sync] Stack:', error.stack);
   }
 }
 

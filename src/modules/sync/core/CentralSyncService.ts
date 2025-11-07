@@ -121,13 +121,26 @@ export class CentralSyncService {
   }
 
   private buildScopeQuery(entityType: string, terminal: any, since: Date): any {
-    const baseQuery = {
-      where: {
-        lastSyncedAt: { gt: since },
-        isActive: true
-      },
-      orderBy: { lastSyncedAt: 'asc' }
-    };
+    // Build base where clause based on entity type capabilities
+    const whereClause: any = {};
+    const orderBy: any = {};
+
+    // Add lastSyncedAt filter only if entity type supports it
+    const entitiesWithLastSyncedAt = ['Product', 'Customer', 'InventoryItem', 'SaleOrder', 'Category', 'Brand'];
+    if (entitiesWithLastSyncedAt.includes(entityType)) {
+      whereClause.lastSyncedAt = { gt: since };
+      orderBy.lastSyncedAt = 'asc';
+    } else {
+      // For entities without lastSyncedAt, use updatedAt or createdAt
+      whereClause.updatedAt = { gt: since };
+      orderBy.updatedAt = 'asc';
+    }
+
+    // Add isActive filter only if entity type supports it
+    const entitiesWithIsActive = ['Product', 'Customer', 'Category', 'Brand', 'TaxCategory'];
+    if (entitiesWithIsActive.includes(entityType)) {
+      whereClause.isActive = true;
+    }
 
     // Add scoping based on entity type and terminal permissions
     switch (entityType) {
@@ -135,36 +148,57 @@ export class CentralSyncService {
       case 'Category':
       case 'Brand':
         return {
-          ...baseQuery,
           where: {
-            ...baseQuery.where,
+            ...whereClause,
             storeId: terminal.storeId
-          }
+          },
+          orderBy
+        };
+
+      case 'TaxCategory':
+        return {
+          where: {
+            ...whereClause,
+            storeId: terminal.storeId
+          },
+          orderBy
         };
 
       case 'InventoryItem':
         return {
-          ...baseQuery,
           where: {
-            ...baseQuery.where,
+            ...whereClause,
             location: { branchId: terminal.branchId }
-          }
+          },
+          orderBy
         };
 
       case 'SaleOrder':
         return {
-          ...baseQuery,
           where: {
-            ...baseQuery.where,
+            ...whereClause,
             OR: [
               { terminalId: terminal.id },
               { location: { branchId: terminal.branchId } }
             ]
-          }
+          },
+          orderBy
+        };
+
+      case 'Customer':
+        return {
+          where: {
+            ...whereClause,
+            storeId: terminal.storeId
+          },
+          orderBy
         };
 
       default:
-        return baseQuery;
+        return {
+          where: whereClause,
+          orderBy
+        };
     }
   }
 
@@ -235,18 +269,20 @@ export class CentralSyncService {
    * Get all active terminals that need sync
    */
   async getActiveTerminals(): Promise<any[]> {
+    // Get all terminals that are active (activated by admin)
+    // Status can be ONLINE, OFFLINE, or even INACTIVE (just activated but not yet connected)
     return await this.centralDb.terminal.findMany({
       where: {
-        isActive: true,
-        status: {
-          in: ['ONLINE', 'OFFLINE']
-        }
+        isActive: true
+        // Removed status filter to include all active terminals regardless of current connection status
+        // This allows terminals that are activated but not yet connected to receive sync triggers
       },
       select: {
         id: true,
         terminalCode: true,
         terminalName: true,
-        status: true
+        status: true,
+        isActive: true
       }
     });
   }
